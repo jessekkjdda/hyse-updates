@@ -40,6 +40,7 @@ jobs:
           npm run test:fade
           npm run test:frames
           npm run test:volume
+          npm run test:collections
           npm run test:dom
           CNCX_SPICY_FIXTURE_OUTPUT=artifacts/checks/spicy-transport.json dotnet run --project tests/CoreChecks -c Release
           npm run test:spicy -- artifacts/checks/spicy-transport.json
@@ -76,7 +77,11 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft > release-state.json 2>/dev/null; then
             python -c "import json;assert json.load(open('release-state.json'))['isDraft'], 'Version already published; bump it.'"
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "hyse $VERSION" --notes "Atualizador automático sobre a base aprovada. Instale esta versão uma vez; futuras versões são baixadas em segundo plano e instaladas ao sair. Conta, playlists, histórico e configurações são preservados. Testes automatizados e cross-build Linux; o Setup ainda requer teste nativo no Windows."
+            if [ -f work/docs/RELEASE-NOTES.md ]; then
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "hyse $VERSION" --notes-file work/docs/RELEASE-NOTES.md
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "hyse $VERSION" --notes "Atualizador automático sobre a base aprovada. Instale esta versão uma vez; futuras versões são baixadas em segundo plano e instaladas ao sair. Conta, playlists, histórico e configurações são preservados. Testes automatizados e cross-build Linux; o Setup ainda requer teste nativo no Windows."
+            fi
           fi
           gh release upload "$TAG" release/*.exe release/*.zip release/*.sha256 --repo "$GITHUB_REPOSITORY" --clobber
           CONTENT=$(base64 -w0 release/hyse-update.json)
