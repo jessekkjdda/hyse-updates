@@ -1,0 +1,50 @@
+name: Publish signed hyse release
+on:
+  push:
+    paths:
+      - 'signed/hyse-update.json'
+      - 'signed/hyse-update.sig.base64'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: hyse-release-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify signed manifest before publishing
+        run: |
+          mkdir -p publish
+          cp signed/hyse-update.json publish/hyse-update.json
+          base64 --decode signed/hyse-update.sig.base64 > publish/hyse-update.sig
+          python - <<'PY'
+          import json,pathlib,re,zipfile
+          with zipfile.ZipFile('source/current.zip') as archive:
+            trust=archive.read('GlassPlayer/Core/UpdateTrust.cs').decode()
+          key=re.search(r'-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----',trust,re.S).group()
+          pathlib.Path('publish/public.pem').write_text(key+'\n')
+          m=json.loads(pathlib.Path('publish/hyse-update.json').read_text())
+          assert m['schema']==1 and m['product']=='hyse' and m['platform']=='windows-x64'
+          assert re.fullmatch(r'(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})',m['version'])
+          assert m['downloadUrl']==f"https://github.com/jessekkjdda/hyse-updates/releases/download/v{m['version']}/hyse-{m['version']}-Setup.exe"
+          pathlib.Path('publish/version.txt').write_text(m['version'])
+          PY
+          openssl dgst -sha256 -verify publish/public.pem -signature publish/hyse-update.sig publish/hyse-update.json
+          VERSION=$(cat publish/version.txt)
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft > publish/state.json
+          python -c "import json;assert json.load(open('publish/state.json'))['isDraft'], 'Release already published.'"
+          gh release download "v$VERSION" --pattern "hyse-$VERSION-Setup.exe" --dir publish --repo "$GITHUB_REPOSITORY"
+          python - <<'PY'
+          import hashlib,json,pathlib
+          m=json.loads(pathlib.Path('publish/hyse-update.json').read_text())
+          b=(pathlib.Path('publish')/f"hyse-{m['version']}-Setup.exe").read_bytes()
+          assert len(b)==m['sizeBytes'] and hashlib.sha256(b).hexdigest()==m['sha256']
+          PY
+          gh release upload "v$VERSION" publish/hyse-update.json publish/hyse-update.sig --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --latest

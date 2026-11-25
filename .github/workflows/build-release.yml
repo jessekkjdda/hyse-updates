@@ -1,0 +1,89 @@
+name: Build hyse release
+on:
+  push:
+    paths:
+      - 'source/current.zip'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: hyse-release-build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.404'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Extract corresponding source
+        run: |
+          python -m zipfile -e source/current.zip work
+      - name: Validate approved app and build
+        working-directory: work
+        run: |
+          npm ci --ignore-scripts
+          node scripts/build-liner.cjs
+          node scripts/check-compat.cjs
+          npm run test:preservation
+          npm run test:web
+          npm run test:liner
+          npm run test:clock
+          npm run test:fade
+          npm run test:frames
+          npm run test:volume
+          npm run test:dom
+          CNCX_SPICY_FIXTURE_OUTPUT=artifacts/checks/spicy-transport.json dotnet run --project tests/CoreChecks -c Release
+          npm run test:spicy -- artifacts/checks/spicy-transport.json
+          dotnet restore GlassPlayer/GlassPlayer.csproj -r win-x64 --locked-mode
+          dotnet publish GlassPlayer/GlassPlayer.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishSingleFile=false -p:PublishTrimmed=false -o artifacts/hyse-windows-x64
+          dotnet publish UpdateHelper/UpdateHelper.csproj -c Release -r win-x64 --self-contained true -o artifacts/update-helper
+          cp artifacts/update-helper/hyse-update.exe artifacts/hyse-windows-x64/hyse-update.exe
+      - name: Package NSIS installer and complete source
+        working-directory: work
+        run: |
+          mkdir -p toolchain
+          curl -fL https://deb.debian.org/debian/pool/main/n/nsis/nsis_3.11-1_amd64.deb -o toolchain/nsis.deb
+          curl -fL https://deb.debian.org/debian/pool/main/n/nsis/nsis-common_3.11-1_all.deb -o toolchain/nsis-common.deb
+          dpkg-deb -x toolchain/nsis.deb toolchain
+          dpkg-deb -x toolchain/nsis-common.deb toolchain
+          VERSION=$(python -c "import xml.etree.ElementTree as E;print(E.parse('GlassPlayer/GlassPlayer.csproj').findtext('.//Version'))")
+          export NSISDIR="$PWD/toolchain/usr/share/nsis"
+          python scripts/build-installer.py --makensis "$PWD/toolchain/usr/bin/makensis" --output "../release/hyse-$VERSION-Setup.exe"
+          python scripts/package-release.py --publish-dir artifacts/hyse-windows-x64 --output "../release/hyse-$VERSION-Windows-x64.zip"
+      - name: Upload to draft and record unsigned manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib,xml.etree.ElementTree as E
+          version=E.parse('work/GlassPlayer/GlassPlayer.csproj').findtext('.//Version')
+          setup=pathlib.Path('release')/f'hyse-{version}-Setup.exe'
+          data=setup.read_bytes()
+          manifest={'schema':1,'product':'hyse','platform':'windows-x64','version':version,'downloadUrl':f'https://github.com/jessekkjdda/hyse-updates/releases/download/v{version}/{setup.name}','sizeBytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+          pathlib.Path('release/hyse-update.json').write_text(json.dumps(manifest,separators=(',',':'))+'\n')
+          pathlib.Path('release/version.txt').write_text(version)
+          PY
+          VERSION=$(cat release/version.txt)
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft > release-state.json 2>/dev/null; then
+            python -c "import json;assert json.load(open('release-state.json'))['isDraft'], 'Version already published; bump it.'"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "hyse $VERSION" --notes "Atualizador automático sobre a base aprovada. Instale esta versão uma vez; futuras versões são baixadas em segundo plano e instaladas ao sair. Conta, playlists, histórico e configurações são preservados. Testes automatizados e cross-build Linux; o Setup ainda requer teste nativo no Windows."
+          fi
+          gh release upload "$TAG" release/*.exe release/*.zip release/*.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+          CONTENT=$(base64 -w0 release/hyse-update.json)
+          SHA=$(gh api "repos/$GITHUB_REPOSITORY/contents/pending/hyse-update.json" --jq .sha 2>/dev/null || true)
+          if [ -n "$SHA" ]; then
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/pending/hyse-update.json" -f message="Prepare unsigned hyse $VERSION manifest" -f content="$CONTENT" -f sha="$SHA"
+          else
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/contents/pending/hyse-update.json" -f message="Prepare unsigned hyse $VERSION manifest" -f content="$CONTENT"
+          fi
+          cat release/hyse-update.json >> "$GITHUB_STEP_SUMMARY"
