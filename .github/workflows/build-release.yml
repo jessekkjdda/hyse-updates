@@ -36,6 +36,7 @@ jobs:
           npm run test:preservation
           npm run test:web
           npm run test:liner
+          npm run test:wave
           npm run test:clock
           npm run test:fade
           npm run test:frames
